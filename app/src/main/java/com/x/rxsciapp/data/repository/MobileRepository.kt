@@ -106,9 +106,6 @@ class MobileRepository(
                     if (current.baseUrl.isBlank() || current.token.isBlank()) {
                         realtimeClient.disconnect()
                         _connectionState.value = ConnectionState.Offline
-                    } else {
-                        _connectionState.value = ConnectionState.Connecting
-                        realtimeClient.connect(current, socketListener)
                     }
                 }
         }
@@ -217,24 +214,35 @@ class MobileRepository(
         )
     }
 
+    fun connectWith(s: ConnectionSettings) {
+        Log.d(TAG, "connectWith: baseUrl=${s.baseUrl} token=${s.token.take(4)}... clientId=${s.clientId}")
+        if (s.baseUrl.isNotBlank()) {
+            _connectionState.value = ConnectionState.Connecting
+            realtimeClient.connect(s, socketListener)
+        } else {
+            realtimeClient.disconnect()
+            _connectionState.value = ConnectionState.Offline
+            Log.d(TAG, "connectWith: skipped, baseUrl is blank")
+        }
+    }
+
     fun reconnect() {
         scope.launch {
             val current = settingsStore.settings.first()
-            Log.d(TAG, "reconnect: baseUrl=${current.baseUrl} token=${current.token.take(4)}... clientId=${current.clientId}")
-            realtimeClient.disconnect()
-            if (current.baseUrl.isNotBlank() && current.token.isNotBlank()) {
-                _connectionState.value = ConnectionState.Connecting
-                realtimeClient.connect(current, socketListener)
-            } else {
-                _connectionState.value = ConnectionState.Offline
-                Log.d(TAG, "reconnect: skipped, baseUrl or token is blank")
-            }
+            connectWith(current)
         }
     }
 
     suspend fun saveAndConnect(baseUrl: String, token: String, deviceName: String) {
-        saveSettings(baseUrl, token, deviceName)
-        reconnect()
+        val current = settings.first()
+        val updated = current.copy(
+            baseUrl = baseUrl,
+            token = token,
+            deviceName = deviceName,
+            clientId = current.clientId.ifBlank { UUID.randomUUID().toString() },
+        )
+        settingsStore.save(updated)
+        connectWith(updated)
     }
 
     suspend fun scanLan(port: Int = 8765): Result<LanScanResult> {

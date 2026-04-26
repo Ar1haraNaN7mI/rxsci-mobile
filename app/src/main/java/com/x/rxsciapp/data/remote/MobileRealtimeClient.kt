@@ -24,22 +24,28 @@ class MobileRealtimeClient {
         .build()
 
     private var webSocket: WebSocket? = null
+    private var generation = 0
 
     fun connect(settings: ConnectionSettings, listener: Listener) {
-        disconnect()
+        generation++
+        val myGen = generation
+        webSocket?.cancel()
+        webSocket = null
+
         val wsUrl = toWebSocketUrl(settings.baseUrl) ?: run {
             Log.e(TAG, "connect: invalid URL '${settings.baseUrl}'")
             listener.onDisconnected("Server URL is invalid")
             return
         }
-        Log.d(TAG, "connect: wsUrl=$wsUrl")
+        Log.d(TAG, "connect[$myGen]: wsUrl=$wsUrl")
         listener.onConnecting()
         val request = Request.Builder().url(wsUrl).build()
         webSocket = client.newWebSocket(
             request,
             object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
-                    Log.d(TAG, "onOpen: connected to $wsUrl")
+                    if (myGen != generation) return
+                    Log.d(TAG, "onOpen[$myGen]: connected")
                     listener.onConnected()
                     val authPayload = """
                         {
@@ -50,22 +56,25 @@ class MobileRealtimeClient {
                           "subscribe_all":true
                         }
                     """.trimIndent()
-                    Log.d(TAG, "onOpen: sending auth (token=${settings.token.take(4)}...)")
+                    Log.d(TAG, "onOpen[$myGen]: sending auth")
                     webSocket.send(authPayload)
                 }
 
                 override fun onMessage(webSocket: WebSocket, text: String) {
-                    Log.d(TAG, "onMessage: ${text.take(200)}")
+                    if (myGen != generation) return
+                    Log.d(TAG, "onMessage[$myGen]: ${text.take(200)}")
                     listener.onTextMessage(text)
                 }
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                    Log.d(TAG, "onClosed: code=$code reason=$reason")
+                    if (myGen != generation) return
+                    Log.d(TAG, "onClosed[$myGen]: code=$code reason=$reason")
                     listener.onDisconnected(reason.ifBlank { "Connection closed" })
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                    Log.e(TAG, "onFailure: ${t.message}", t)
+                    if (myGen != generation) return
+                    Log.e(TAG, "onFailure[$myGen]: ${t.message}", t)
                     listener.onDisconnected(t.message ?: "Network failure")
                 }
             },
@@ -75,7 +84,8 @@ class MobileRealtimeClient {
     fun send(text: String): Boolean = webSocket?.send(text) == true
 
     fun disconnect() {
-        webSocket?.close(1000, "client reset")
+        generation++
+        webSocket?.cancel()
         webSocket = null
     }
 
