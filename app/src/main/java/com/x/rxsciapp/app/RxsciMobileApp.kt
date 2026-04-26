@@ -112,7 +112,7 @@ fun RxsciMobileApp(container: AppContainer) {
             if (server != null) {
                 container.repository.saveAndConnect(
                     baseUrl = server.baseUrl,
-                    token = current.token,
+                    token = server.token.ifBlank { current.token },
                     deviceName = current.deviceName.ifBlank { android.os.Build.MODEL },
                 )
                 snackbarHostState.showSnackbar("Found ${server.name} at ${server.host}")
@@ -1020,8 +1020,9 @@ private fun SettingsRoute(
                                     server = server,
                                     onUse = {
                                         baseUrl = server.baseUrl
+                                        if (server.token.isNotBlank()) token = server.token
                                         scope.launch {
-                                            repository.saveAndConnect(server.baseUrl, token, deviceName)
+                                            repository.saveAndConnect(server.baseUrl, server.token.ifBlank { token }, deviceName)
                                             snackbarHostState.showSnackbar("Connecting to ${server.host}...")
                                         }
                                     },
@@ -1041,8 +1042,9 @@ private fun SettingsRoute(
                                     device = device,
                                     onUseRxsci = { server ->
                                         baseUrl = server.baseUrl
+                                        if (server.token.isNotBlank()) token = server.token
                                         scope.launch {
-                                            repository.saveAndConnect(server.baseUrl, token, deviceName)
+                                            repository.saveAndConnect(server.baseUrl, server.token.ifBlank { token }, deviceName)
                                             snackbarHostState.showSnackbar("Connecting to ${server.host}...")
                                         }
                                     },

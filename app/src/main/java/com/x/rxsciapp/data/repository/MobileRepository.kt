@@ -336,6 +336,7 @@ class MobileRepository(
                                             port = port,
                                             name = json.optString("name").ifBlank { "RxSci" },
                                             version = json.optString("version").ifBlank { "?" },
+                                            token = json.optString("token"),
                                         )
                                     )
                                 }
@@ -656,6 +657,7 @@ class MobileRepository(
                     port = port,
                     name = json.optString("name").ifBlank { "RxSci Mobile" },
                     version = json.optString("version").ifBlank { "unknown" },
+                    token = json.optString("token"),
                 )
             }
         }.getOrNull()

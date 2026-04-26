@@ -13,6 +13,7 @@ data class DiscoveredServer(
     val port: Int,
     val name: String,
     val version: String,
+    val token: String = "",
 )
 
 data class LanDevice(
