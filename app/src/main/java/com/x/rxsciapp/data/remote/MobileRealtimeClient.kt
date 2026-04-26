@@ -1,5 +1,6 @@
 package com.x.rxsciapp.data.remote
 
+import android.util.Log
 import com.x.rxsciapp.model.ConnectionSettings
 import java.util.concurrent.TimeUnit
 import okhttp3.OkHttpClient
@@ -27,18 +28,20 @@ class MobileRealtimeClient {
     fun connect(settings: ConnectionSettings, listener: Listener) {
         disconnect()
         val wsUrl = toWebSocketUrl(settings.baseUrl) ?: run {
+            Log.e(TAG, "connect: invalid URL '${settings.baseUrl}'")
             listener.onDisconnected("Server URL is invalid")
             return
         }
+        Log.d(TAG, "connect: wsUrl=$wsUrl")
         listener.onConnecting()
         val request = Request.Builder().url(wsUrl).build()
         webSocket = client.newWebSocket(
             request,
             object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
+                    Log.d(TAG, "onOpen: connected to $wsUrl")
                     listener.onConnected()
-                    webSocket.send(
-                        """
+                    val authPayload = """
                         {
                           "type":"auth",
                           "token":${json(settings.token)},
@@ -46,19 +49,23 @@ class MobileRealtimeClient {
                           "device_name":${json(settings.deviceName)},
                           "subscribe_all":true
                         }
-                        """.trimIndent()
-                    )
+                    """.trimIndent()
+                    Log.d(TAG, "onOpen: sending auth (token=${settings.token.take(4)}...)")
+                    webSocket.send(authPayload)
                 }
 
                 override fun onMessage(webSocket: WebSocket, text: String) {
+                    Log.d(TAG, "onMessage: ${text.take(200)}")
                     listener.onTextMessage(text)
                 }
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                    Log.d(TAG, "onClosed: code=$code reason=$reason")
                     listener.onDisconnected(reason.ifBlank { "Connection closed" })
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    Log.e(TAG, "onFailure: ${t.message}", t)
                     listener.onDisconnected(t.message ?: "Network failure")
                 }
             },
@@ -73,15 +80,12 @@ class MobileRealtimeClient {
     }
 
     private fun toWebSocketUrl(baseUrl: String): String? {
-        val url = baseUrl.trim().trimEnd('/').toHttpUrlOrNull() ?: return null
-        val scheme = when (url.scheme) {
-            "https" -> "wss"
-            "http" -> "ws"
-            "ws", "wss" -> url.scheme
-            else -> return null
-        }
-        return url.newBuilder()
-            .scheme(scheme)
+        val raw = baseUrl.trim().trimEnd('/')
+        val httpUrl = raw
+            .replace(Regex("^wss://"), "https://")
+            .replace(Regex("^ws://"), "http://")
+            .toHttpUrlOrNull() ?: return null
+        return httpUrl.newBuilder()
             .addPathSegments("mobile/ws")
             .build()
             .toString()
@@ -89,5 +93,9 @@ class MobileRealtimeClient {
 
     private fun json(value: String): String {
         return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+    }
+
+    companion object {
+        private const val TAG = "RxSciWS"
     }
 }

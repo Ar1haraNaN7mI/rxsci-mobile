@@ -102,10 +102,12 @@ class MobileRepository(
             settingsStore.settings
                 .distinctUntilChanged()
                 .collect { current ->
+                    Log.d(TAG, "settings changed: baseUrl=${current.baseUrl} token=${current.token.take(4)}...")
                     if (current.baseUrl.isBlank() || current.token.isBlank()) {
                         realtimeClient.disconnect()
                         _connectionState.value = ConnectionState.Offline
                     } else {
+                        _connectionState.value = ConnectionState.Connecting
                         realtimeClient.connect(current, socketListener)
                     }
                 }
@@ -213,6 +215,26 @@ class MobileRepository(
                 clientId = current.clientId.ifBlank { UUID.randomUUID().toString() },
             )
         )
+    }
+
+    fun reconnect() {
+        scope.launch {
+            val current = settingsStore.settings.first()
+            Log.d(TAG, "reconnect: baseUrl=${current.baseUrl} token=${current.token.take(4)}... clientId=${current.clientId}")
+            realtimeClient.disconnect()
+            if (current.baseUrl.isNotBlank() && current.token.isNotBlank()) {
+                _connectionState.value = ConnectionState.Connecting
+                realtimeClient.connect(current, socketListener)
+            } else {
+                _connectionState.value = ConnectionState.Offline
+                Log.d(TAG, "reconnect: skipped, baseUrl or token is blank")
+            }
+        }
+    }
+
+    suspend fun saveAndConnect(baseUrl: String, token: String, deviceName: String) {
+        saveSettings(baseUrl, token, deviceName)
+        reconnect()
     }
 
     suspend fun scanLan(port: Int = 8765): Result<LanScanResult> {

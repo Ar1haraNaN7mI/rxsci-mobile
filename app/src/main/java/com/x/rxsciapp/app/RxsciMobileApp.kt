@@ -110,13 +110,15 @@ fun RxsciMobileApp(container: AppContainer) {
         if (current.baseUrl.isBlank()) {
             val server = container.repository.autoDiscover()
             if (server != null) {
-                container.repository.saveSettings(
+                container.repository.saveAndConnect(
                     baseUrl = server.baseUrl,
                     token = current.token,
                     deviceName = current.deviceName.ifBlank { android.os.Build.MODEL },
                 )
-                snackbarHostState.showSnackbar("Auto-connected to ${server.name} (${server.host})")
+                snackbarHostState.showSnackbar("Found ${server.name} at ${server.host}")
             }
+        } else if (current.token.isNotBlank()) {
+            container.repository.reconnect()
         }
     }
 
@@ -1016,7 +1018,13 @@ private fun SettingsRoute(
                             discoveredServers.forEach { server ->
                                 DiscoveredServerCard(
                                     server = server,
-                                    onUse = { baseUrl = server.baseUrl },
+                                    onUse = {
+                                        baseUrl = server.baseUrl
+                                        scope.launch {
+                                            repository.saveAndConnect(server.baseUrl, token, deviceName)
+                                            snackbarHostState.showSnackbar("Connecting to ${server.host}...")
+                                        }
+                                    },
                                 )
                             }
                         }
@@ -1031,7 +1039,13 @@ private fun SettingsRoute(
                             lanDevices.sortedByDescending { it.rxsciServer != null }.forEach { device ->
                                 LanDeviceCard(
                                     device = device,
-                                    onUseRxsci = { server -> baseUrl = server.baseUrl },
+                                    onUseRxsci = { server ->
+                                        baseUrl = server.baseUrl
+                                        scope.launch {
+                                            repository.saveAndConnect(server.baseUrl, token, deviceName)
+                                            snackbarHostState.showSnackbar("Connecting to ${server.host}...")
+                                        }
+                                    },
                                 )
                             }
                         }
@@ -1071,17 +1085,50 @@ private fun SettingsRoute(
                 modifier = Modifier.fillMaxWidth(),
                 label = { Text("Device name") },
             )
-            Button(
-                onClick = {
-                    scope.launch {
-                        repository.saveSettings(baseUrl, token, deviceName)
-                        snackbarHostState.showSnackbar("Settings saved")
-                        onBack()
-                    }
+
+            val connState by repository.connectionState.collectAsState()
+            val stateText = when (connState) {
+                ConnectionState.Connected -> "Connected"
+                ConnectionState.Connecting -> "Connecting..."
+                ConnectionState.Offline -> "Offline"
+                is ConnectionState.Error -> "Error: ${(connState as ConnectionState.Error).reason}"
+            }
+            Text(
+                stateText,
+                style = MaterialTheme.typography.bodySmall,
+                color = when (connState) {
+                    ConnectionState.Connected -> MaterialTheme.colorScheme.primary
+                    is ConnectionState.Error -> MaterialTheme.colorScheme.error
+                    else -> MaterialTheme.colorScheme.onSurfaceVariant
                 },
+            )
+
+            Row(
                 modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Text("Save and reconnect")
+                Button(
+                    onClick = {
+                        scope.launch {
+                            repository.saveSettings(baseUrl, token, deviceName)
+                            snackbarHostState.showSnackbar("Settings saved")
+                        }
+                    },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("Save")
+                }
+                Button(
+                    onClick = {
+                        scope.launch {
+                            repository.saveAndConnect(baseUrl, token, deviceName)
+                            snackbarHostState.showSnackbar("Connecting...")
+                        }
+                    },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("Connect")
+                }
             }
         }
     }
