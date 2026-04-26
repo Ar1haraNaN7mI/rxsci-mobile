@@ -36,6 +36,12 @@ class SessionsViewModel(
             repository.setSessionArchived(sessionId, archived)
         }
     }
+
+    fun deleteSession(sessionId: String) {
+        viewModelScope.launch {
+            repository.deleteSession(sessionId)
+        }
+    }
 }
 
 class ChatViewModel(

@@ -98,6 +98,9 @@ interface SessionDao {
 
     @Query("UPDATE sessions SET archived = :archived WHERE sessionId = :sessionId")
     suspend fun setArchived(sessionId: String, archived: Boolean)
+
+    @Query("DELETE FROM sessions WHERE sessionId = :sessionId")
+    suspend fun deleteSession(sessionId: String)
 }
 
 @Dao
@@ -117,6 +120,9 @@ interface MessageDao {
 
     @Query("DELETE FROM messages WHERE messageId = :messageId")
     suspend fun deleteMessage(messageId: String)
+
+    @Query("DELETE FROM messages WHERE sessionId = :sessionId")
+    suspend fun deleteMessagesForSession(sessionId: String)
 
     @Query("SELECT * FROM messages WHERE sessionId = :sessionId AND clientMessageId = :clientMessageId LIMIT 1")
     suspend fun findByClientMessageId(

@@ -7,6 +7,7 @@ import android.net.Uri
 import android.util.Log
 import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
+import androidx.room.withTransaction
 import com.x.rxsciapp.data.local.AttachmentEntity
 import com.x.rxsciapp.data.local.MessageEntity
 import com.x.rxsciapp.data.local.MessageWithAttachments
@@ -151,6 +152,13 @@ class MobileRepository(
 
     suspend fun setSessionArchived(sessionId: String, archived: Boolean) {
         database.sessionDao().setArchived(sessionId, archived)
+    }
+
+    suspend fun deleteSession(sessionId: String) {
+        database.withTransaction {
+            database.messageDao().deleteMessagesForSession(sessionId)
+            database.sessionDao().deleteSession(sessionId)
+        }
     }
 
     suspend fun downloadAttachment(attachment: AttachmentItem): Result<Uri> {

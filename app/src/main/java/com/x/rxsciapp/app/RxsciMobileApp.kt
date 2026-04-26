@@ -34,6 +34,7 @@ import androidx.compose.material.icons.outlined.Archive
 import androidx.compose.material.icons.outlined.AttachFile
 import androidx.compose.material.icons.outlined.CloudDone
 import androidx.compose.material.icons.outlined.CloudOff
+import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Image
@@ -157,6 +158,7 @@ fun RxsciMobileApp(container: AppContainer) {
                     }
                 },
                 onSetArchived = viewModel::setArchived,
+                onDeleteSession = viewModel::deleteSession,
             )
         }
 
@@ -213,6 +215,7 @@ private fun SessionsRoute(
     onOpenSession: (String) -> Unit,
     onCreateSession: () -> Unit,
     onSetArchived: (String, Boolean) -> Unit,
+    onDeleteSession: (String) -> Unit,
 ) {
     var query by rememberSaveable { mutableStateOf("") }
     var showArchived by rememberSaveable { mutableStateOf(false) }
@@ -327,6 +330,9 @@ private fun SessionsRoute(
                         onArchiveToggle = {
                             onSetArchived(session.sessionId, !session.archived)
                         },
+                        onDelete = {
+                            onDeleteSession(session.sessionId)
+                        },
                     )
                 }
             }
@@ -388,6 +394,7 @@ private fun SessionCard(
     session: SessionItem,
     onClick: () -> Unit,
     onArchiveToggle: () -> Unit,
+    onDelete: () -> Unit,
 ) {
     Card(
         onClick = onClick,
@@ -442,6 +449,13 @@ private fun SessionCard(
                         } else {
                             "Archive session"
                         },
+                    )
+                }
+                IconButton(onClick = onDelete) {
+                    Icon(
+                        Icons.Outlined.Delete,
+                        contentDescription = "Delete session",
+                        tint = MaterialTheme.colorScheme.error,
                     )
                 }
             }
