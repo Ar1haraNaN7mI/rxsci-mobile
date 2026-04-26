@@ -23,8 +23,11 @@ data class LanDevice(
 )
 
 data class LanScanResult(
-    val devices: List<LanDevice>,
-    val servers: List<DiscoveredServer>,
+    val devices: List<LanDevice> = emptyList(),
+    val servers: List<DiscoveredServer> = emptyList(),
+    val localIp: String = "",
+    val hostsScanned: Int = 0,
+    val debugLog: String = "",
 )
 
 data class SessionItem(

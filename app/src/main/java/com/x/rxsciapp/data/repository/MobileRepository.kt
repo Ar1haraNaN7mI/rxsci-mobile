@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.LinkAddress
 import android.net.Uri
+import android.util.Log
 import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
 import com.x.rxsciapp.data.local.AttachmentEntity
@@ -24,12 +25,15 @@ import com.x.rxsciapp.model.MessageItem
 import com.x.rxsciapp.model.SessionItem
 import java.io.File
 import java.io.IOException
+import java.net.DatagramPacket
+import java.net.DatagramSocket
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.NetworkInterface
 import java.net.Socket
-import java.util.concurrent.TimeUnit
 import java.util.UUID
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -44,6 +48,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
@@ -65,19 +70,22 @@ class MobileRepository(
     private val realtimeClient: MobileRealtimeClient,
 ) {
     private companion object {
-        const val LAN_SCAN_TIMEOUT_MS = 3_000L
-        const val LAN_SCAN_CONCURRENCY = 96
-        const val HOST_REACHABLE_TIMEOUT_MS = 350
-        const val TCP_CONNECT_TIMEOUT_MS = 180
-        val ALIVE_PROBE_PORTS = listOf(8765, 80, 443, 22, 445, 3389, 8080)
+        const val TAG = "RxSciLanScan"
+        const val LAN_SCAN_TIMEOUT_MS = 15_000L
+        const val LAN_SCAN_CONCURRENCY = 64
+        const val TCP_CONNECT_TIMEOUT_MS = 500
+        const val ICMP_TIMEOUT_MS = 1000
+        const val UDP_BROADCAST_PORT = 8766
+        const val UDP_LISTEN_TIMEOUT_MS = 4000
+        val PROBE_PORTS = listOf(8765, 80, 443, 22, 8080)
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val httpClient = OkHttpClient()
     private val discoveryClient = OkHttpClient.Builder()
-        .connectTimeout(700, TimeUnit.MILLISECONDS)
-        .readTimeout(700, TimeUnit.MILLISECONDS)
-        .callTimeout(1_200, TimeUnit.MILLISECONDS)
+        .connectTimeout(400, TimeUnit.MILLISECONDS)
+        .readTimeout(400, TimeUnit.MILLISECONDS)
+        .callTimeout(900, TimeUnit.MILLISECONDS)
         .build()
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Offline)
     private val _settings = settingsStore.settings.stateIn(
@@ -210,25 +218,56 @@ class MobileRepository(
     suspend fun scanLan(port: Int = 8765): Result<LanScanResult> {
         return withContext(Dispatchers.IO) {
             runCatching {
-                val hosts = localSubnetHosts()
+                val log = StringBuilder()
+                val (localIp, hosts) = localSubnetHosts(log)
+                Log.d(TAG, "scanLan: localIp=$localIp, hosts=${hosts.size}")
+                log.appendLine("[scan] localIp=$localIp, hosts=${hosts.size}")
+
+                if (hosts.isEmpty()) {
+                    log.appendLine("[scan] ABORT: no hosts to scan")
+                    return@runCatching LanScanResult(
+                        debugLog = log.toString(),
+                        localIp = localIp,
+                    )
+                }
+
                 val semaphore = Semaphore(LAN_SCAN_CONCURRENCY)
-                val devices = withTimeoutOrNull(LAN_SCAN_TIMEOUT_MS) {
-                    hosts.map { host ->
-                        async {
-                            semaphore.withPermit {
-                                probeLanDevice(host, port)
+                val found = java.util.concurrent.ConcurrentLinkedQueue<LanDevice>()
+                val debugHits = java.util.concurrent.ConcurrentLinkedQueue<String>()
+
+                withTimeoutOrNull(LAN_SCAN_TIMEOUT_MS) {
+                    supervisorScope {
+                        hosts.map { host ->
+                            async {
+                                semaphore.withPermit {
+                                    val device = probeLanDevice(host, port)
+                                    if (device != null) {
+                                        found.add(device)
+                                        val msg = "[hit] ${device.host} alive=${device.aliveBy} ports=${device.openPorts} rxsci=${device.rxsciServer != null}"
+                                        debugHits.add(msg)
+                                        Log.d(TAG, msg)
+                                    }
+                                }
                             }
-                        }
-                    }.awaitAll()
-                }.orEmpty()
-                    .filterNotNull()
+                        }.awaitAll()
+                    }
+                } ?: log.appendLine("[scan] TIMEOUT after ${LAN_SCAN_TIMEOUT_MS}ms")
+
+                val devices = found.toList()
                     .distinctBy { it.host }
                     .sortedBy { it.host }
+                debugHits.forEach { log.appendLine(it) }
+                log.appendLine("[scan] done: ${devices.size} device(s)")
+                Log.d(TAG, "scanLan done: ${devices.size} devices")
+
                 LanScanResult(
                     devices = devices,
                     servers = devices.mapNotNull { it.rxsciServer }
                         .distinctBy { it.baseUrl }
                         .sortedBy { it.host },
+                    localIp = localIp,
+                    hostsScanned = hosts.size,
+                    debugLog = log.toString(),
                 )
             }
         }
@@ -236,6 +275,64 @@ class MobileRepository(
 
     suspend fun discoverLanServers(port: Int = 8765): Result<List<DiscoveredServer>> {
         return scanLan(port).map { it.servers }
+    }
+
+    suspend fun listenForBroadcast(): List<DiscoveredServer> {
+        return withContext(Dispatchers.IO) {
+            val servers = mutableListOf<DiscoveredServer>()
+            val seen = mutableSetOf<String>()
+            runCatching {
+                DatagramSocket(UDP_BROADCAST_PORT).use { socket ->
+                    socket.broadcast = true
+                    socket.soTimeout = UDP_LISTEN_TIMEOUT_MS
+                    val buf = ByteArray(1024)
+                    val deadline = System.currentTimeMillis() + UDP_LISTEN_TIMEOUT_MS
+                    while (System.currentTimeMillis() < deadline) {
+                        val packet = DatagramPacket(buf, buf.size)
+                        runCatching {
+                            socket.receive(packet)
+                            val data = String(packet.data, 0, packet.length)
+                            val json = JSONObject(data)
+                            if (json.optString("service") == "rxsci-mobile") {
+                                val host = packet.address.hostAddress ?: return@runCatching
+                                if (seen.add(host)) {
+                                    val port = json.optInt("port", 8765)
+                                    val baseUrl = "http://$host:$port"
+                                    Log.d(TAG, "[udp] beacon from $host:$port")
+                                    servers.add(
+                                        DiscoveredServer(
+                                            baseUrl = baseUrl,
+                                            host = host,
+                                            port = port,
+                                            name = json.optString("name").ifBlank { "RxSci" },
+                                            version = json.optString("version").ifBlank { "?" },
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            servers
+        }
+    }
+
+    suspend fun autoDiscover(): DiscoveredServer? {
+        Log.d(TAG, "autoDiscover: starting UDP listen + subnet scan")
+        val udpDeferred = scope.async(Dispatchers.IO) { listenForBroadcast() }
+        val scanDeferred = scope.async(Dispatchers.IO) {
+            scanLan().getOrNull()?.servers.orEmpty()
+        }
+        val udpServers = udpDeferred.await()
+        if (udpServers.isNotEmpty()) {
+            scanDeferred.cancel()
+            Log.d(TAG, "autoDiscover: found via UDP: ${udpServers.first().baseUrl}")
+            return udpServers.first()
+        }
+        val scanServers = scanDeferred.await()
+        Log.d(TAG, "autoDiscover: scan found ${scanServers.size} server(s)")
+        return scanServers.firstOrNull()
     }
 
     suspend fun createSession(): String {
@@ -402,20 +499,66 @@ class MobileRepository(
         }
     }
 
-    private fun localSubnetHosts(): List<String> {
-        val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE)
-            as? ConnectivityManager ?: return emptyList()
-        val activeNetwork = connectivityManager.activeNetwork ?: return emptyList()
-        val linkProperties = connectivityManager.getLinkProperties(activeNetwork) ?: return emptyList()
-        return linkProperties.linkAddresses
-            .mapNotNull { it.toIpv4Host() }
-            .flatMap { host ->
-                val parts = host.split(".")
-                if (parts.size != 4) return@flatMap emptyList()
-                val prefix = parts.take(3).joinToString(".")
-                (1..254).map { "$prefix.$it" }.filterNot { it == host }
+    private fun localSubnetHosts(log: StringBuilder): Pair<String, List<String>> {
+        val localIp = findLocalWifiIpv4(log)
+        if (localIp.isNullOrBlank()) {
+            log.appendLine("[hosts] no local IP found")
+            return "" to emptyList()
+        }
+        val parts = localIp.split(".")
+        if (parts.size != 4) {
+            log.appendLine("[hosts] bad IP format: $localIp")
+            return localIp to emptyList()
+        }
+        val prefix = parts.take(3).joinToString(".")
+        val hosts = (0..255).map { "$prefix.$it" }
+        log.appendLine("[hosts] subnet=$prefix.0/24, total=${hosts.size}")
+        return localIp to hosts
+    }
+
+    @Suppress("DEPRECATION")
+    private fun findLocalWifiIpv4(log: StringBuilder): String? {
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE)
+            as? ConnectivityManager
+        if (cm != null) {
+            try {
+                for (network in cm.allNetworks) {
+                    val caps = cm.getNetworkCapabilities(network) ?: continue
+                    val isWifi = caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI)
+                    val lp = cm.getLinkProperties(network)
+                    val addrs = lp?.linkAddresses?.mapNotNull { it.toIpv4Host() }.orEmpty()
+                    log.appendLine("[net] network=$network wifi=$isWifi addrs=$addrs")
+                    Log.d(TAG, "[net] network=$network wifi=$isWifi addrs=$addrs")
+                    if (isWifi && addrs.isNotEmpty()) return addrs.first()
+                }
+            } catch (e: Exception) {
+                log.appendLine("[net] allNetworks error: ${e.message}")
             }
-            .distinct()
+            val activeNet = cm.activeNetwork
+            if (activeNet != null) {
+                val lp = cm.getLinkProperties(activeNet)
+                val addrs = lp?.linkAddresses?.mapNotNull { it.toIpv4Host() }.orEmpty()
+                log.appendLine("[net] activeNetwork=$activeNet addrs=$addrs")
+                Log.d(TAG, "[net] activeNetwork=$activeNet addrs=$addrs")
+                if (addrs.isNotEmpty()) return addrs.first()
+            }
+        } else {
+            log.appendLine("[net] ConnectivityManager is null")
+        }
+        return runCatching {
+            val ifaces = NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
+            for (iface in ifaces) {
+                if (!iface.isUp || iface.isLoopback) continue
+                val addrs = iface.inetAddresses.toList()
+                    .filterIsInstance<Inet4Address>()
+                    .filterNot { it.isLoopbackAddress || it.isLinkLocalAddress }
+                    .mapNotNull { it.hostAddress }
+                log.appendLine("[net] iface=${iface.name} up=${iface.isUp} addrs=$addrs")
+                Log.d(TAG, "[net] iface=${iface.name} addrs=$addrs")
+                if (addrs.isNotEmpty()) return@runCatching addrs.first()
+            }
+            null
+        }.getOrNull()
     }
 
     private fun LinkAddress.toIpv4Host(): String? {
@@ -425,19 +568,22 @@ class MobileRepository(
     }
 
     private fun probeLanDevice(host: String, rxsciPort: Int): LanDevice? {
-        val rxsciServer = probeMobileServer(host, rxsciPort)
-        val openPorts = ALIVE_PROBE_PORTS
-            .distinct()
-            .filter { port -> rxsciServer?.port == port || canConnect(host, port) }
-        val reachable = rxsciServer != null ||
-            openPorts.isNotEmpty() ||
-            canReachHost(host)
-        if (!reachable) return null
+        val openPorts = mutableListOf<Int>()
+        for (port in PROBE_PORTS) {
+            if (canConnect(host, port)) openPorts.add(port)
+        }
+        val icmpOk = if (openPorts.isEmpty()) canReachIcmp(host) else false
+
+        if (openPorts.isEmpty() && !icmpOk) return null
+
+        val rxsciServer = if (openPorts.contains(rxsciPort)) {
+            probeMobileServer(host, rxsciPort)
+        } else null
 
         val aliveBy = when {
             rxsciServer != null -> "rxsci"
             openPorts.isNotEmpty() -> "tcp"
-            else -> "reachable"
+            else -> "icmp"
         }
         return LanDevice(
             host = host,
@@ -447,18 +593,18 @@ class MobileRepository(
         )
     }
 
-    private fun canReachHost(host: String): Boolean {
-        return runCatching {
-            InetAddress.getByName(host).isReachable(HOST_REACHABLE_TIMEOUT_MS)
-        }.getOrDefault(false)
-    }
-
     private fun canConnect(host: String, port: Int): Boolean {
         return runCatching {
             Socket().use { socket ->
                 socket.connect(InetSocketAddress(host, port), TCP_CONNECT_TIMEOUT_MS)
                 true
             }
+        }.getOrDefault(false)
+    }
+
+    private fun canReachIcmp(host: String): Boolean {
+        return runCatching {
+            InetAddress.getByName(host).isReachable(ICMP_TIMEOUT_MS)
         }.getOrDefault(false)
     }
 

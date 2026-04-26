@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -25,6 +26,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Add
@@ -76,6 +78,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -100,6 +103,22 @@ import kotlinx.coroutines.launch
 fun RxsciMobileApp(container: AppContainer) {
     val navController = rememberNavController()
     val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(Unit) {
+        val current = container.repository.settings.value
+        if (current.baseUrl.isBlank()) {
+            val server = container.repository.autoDiscover()
+            if (server != null) {
+                container.repository.saveSettings(
+                    baseUrl = server.baseUrl,
+                    token = current.token,
+                    deviceName = current.deviceName.ifBlank { android.os.Build.MODEL },
+                )
+                snackbarHostState.showSnackbar("Auto-connected to ${server.name} (${server.host})")
+            }
+        }
+    }
 
     NavHost(
         navController = navController,
@@ -808,39 +827,69 @@ private fun DiscoveredServerCard(
 }
 
 @Composable
-private fun LanDeviceCard(device: LanDevice) {
+private fun LanDeviceCard(device: LanDevice, onUseRxsci: ((DiscoveredServer) -> Unit)? = null) {
+    val isRxsci = device.rxsciServer != null
     Card(
         shape = RoundedCornerShape(18.dp),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+            containerColor = if (isRxsci)
+                MaterialTheme.colorScheme.primaryContainer
+            else
+                MaterialTheme.colorScheme.surfaceContainer,
         ),
     ) {
-        Column(
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                device.host,
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(
-                buildString {
-                    append("Alive by ")
-                    append(device.aliveBy)
-                    if (device.openPorts.isNotEmpty()) {
-                        append(" - open ports: ")
-                        append(device.openPorts.joinToString(", "))
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        device.host,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    if (isRxsci) {
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = MaterialTheme.colorScheme.primary,
+                        ) {
+                            Text(
+                                "RxSci",
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onPrimary,
+                            )
+                        }
                     }
-                    if (device.rxsciServer != null) {
-                        append(" - RxSci CLI")
-                    }
-                },
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall,
-            )
+                }
+                Text(
+                    buildString {
+                        if (isRxsci) {
+                            append(device.rxsciServer!!.name)
+                            append(" v${device.rxsciServer!!.version}")
+                        } else {
+                            append("Alive by ${device.aliveBy}")
+                        }
+                        if (device.openPorts.isNotEmpty()) {
+                            append(" | ports: ${device.openPorts.joinToString(", ")}")
+                        }
+                    },
+                    color = if (isRxsci)
+                        MaterialTheme.colorScheme.onPrimaryContainer
+                    else
+                        MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            if (isRxsci && onUseRxsci != null) {
+                Button(onClick = { onUseRxsci(device.rxsciServer!!) }) {
+                    Text("Use")
+                }
+            }
         }
     }
 }
@@ -859,6 +908,7 @@ private fun SettingsRoute(
     var scanning by rememberSaveable { mutableStateOf(false) }
     var discoveredServers by remember { mutableStateOf<List<DiscoveredServer>>(emptyList()) }
     var lanDevices by remember { mutableStateOf<List<LanDevice>>(emptyList()) }
+    var scanDebugLog by remember { mutableStateOf("") }
     val scope = rememberCoroutineScope()
 
     Scaffold(
@@ -910,7 +960,7 @@ private fun SettingsRoute(
                                 fontWeight = FontWeight.SemiBold,
                             )
                             Text(
-                                "Scan the current subnet for live devices and RxSci CLI hosts. Timeout: 3s.",
+                                "Scan the current subnet for live devices and RxSci CLI hosts.",
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 style = MaterialTheme.typography.bodySmall,
                             )
@@ -926,11 +976,14 @@ private fun SettingsRoute(
                                         .onSuccess { scan ->
                                             lanDevices = scan.devices
                                             discoveredServers = scan.servers
+                                            scanDebugLog = scan.debugLog
+                                            val ipInfo = if (scan.localIp.isNotBlank()) "IP: ${scan.localIp}, " else "No WiFi IP! "
                                             snackbarHostState.showSnackbar(
-                                                "Found ${scan.devices.size} device(s), ${scan.servers.size} RxSci host(s)"
+                                                "${ipInfo}scanned ${scan.hostsScanned}, found ${scan.devices.size} device(s), ${scan.servers.size} RxSci"
                                             )
                                         }
                                         .onFailure {
+                                            scanDebugLog = "ERROR: ${it.stackTraceToString()}"
                                             snackbarHostState.showSnackbar(
                                                 it.message ?: "LAN scan failed"
                                             )
@@ -971,13 +1024,37 @@ private fun SettingsRoute(
                     if (lanDevices.isNotEmpty()) {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text(
-                                "Live LAN devices",
+                                "All LAN devices",
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.SemiBold,
                             )
-                            lanDevices.forEach { device ->
-                                LanDeviceCard(device = device)
+                            lanDevices.sortedByDescending { it.rxsciServer != null }.forEach { device ->
+                                LanDeviceCard(
+                                    device = device,
+                                    onUseRxsci = { server -> baseUrl = server.baseUrl },
+                                )
                             }
+                        }
+                    }
+                    if (scanDebugLog.isNotBlank()) {
+                        SelectionContainer {
+                            Text(
+                                scanDebugLog,
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                    fontSize = 10.sp,
+                                ),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 200.dp)
+                                    .verticalScroll(rememberScrollState())
+                                    .background(
+                                        MaterialTheme.colorScheme.surfaceVariant,
+                                        shape = MaterialTheme.shapes.small,
+                                    )
+                                    .padding(8.dp),
+                            )
                         }
                     }
                 }
