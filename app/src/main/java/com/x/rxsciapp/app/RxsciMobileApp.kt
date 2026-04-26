@@ -7,6 +7,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -84,6 +86,7 @@ import com.x.rxsciapp.data.repository.MobileRepository
 import com.x.rxsciapp.model.AttachmentItem
 import com.x.rxsciapp.model.ConnectionState
 import com.x.rxsciapp.model.DiscoveredServer
+import com.x.rxsciapp.model.LanDevice
 import com.x.rxsciapp.model.MessageItem
 import com.x.rxsciapp.model.SessionItem
 import com.x.rxsciapp.ui.ChatViewModel
@@ -804,6 +807,44 @@ private fun DiscoveredServerCard(
     }
 }
 
+@Composable
+private fun LanDeviceCard(device: LanDevice) {
+    Card(
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+        ),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                device.host,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                buildString {
+                    append("Alive by ")
+                    append(device.aliveBy)
+                    if (device.openPorts.isNotEmpty()) {
+                        append(" - open ports: ")
+                        append(device.openPorts.joinToString(", "))
+                    }
+                    if (device.rxsciServer != null) {
+                        append(" - RxSci CLI")
+                    }
+                },
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsRoute(
@@ -817,6 +858,7 @@ private fun SettingsRoute(
     var deviceName by rememberSaveable(settings.deviceName) { mutableStateOf(settings.deviceName) }
     var scanning by rememberSaveable { mutableStateOf(false) }
     var discoveredServers by remember { mutableStateOf<List<DiscoveredServer>>(emptyList()) }
+    var lanDevices by remember { mutableStateOf<List<LanDevice>>(emptyList()) }
     val scope = rememberCoroutineScope()
 
     Scaffold(
@@ -835,6 +877,7 @@ private fun SettingsRoute(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
+                .verticalScroll(rememberScrollState())
                 .padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
@@ -867,7 +910,7 @@ private fun SettingsRoute(
                                 fontWeight = FontWeight.SemiBold,
                             )
                             Text(
-                                "Scan the current subnet for running RxSci mobile servers.",
+                                "Scan the current subnet for live devices and RxSci CLI hosts. Timeout: 3s.",
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 style = MaterialTheme.typography.bodySmall,
                             )
@@ -877,13 +920,14 @@ private fun SettingsRoute(
                             onClick = {
                                 scope.launch {
                                     scanning = true
-                                    val result = repository.discoverLanServers()
+                                    val result = repository.scanLan()
                                     scanning = false
                                     result
-                                        .onSuccess {
-                                            discoveredServers = it
+                                        .onSuccess { scan ->
+                                            lanDevices = scan.devices
+                                            discoveredServers = scan.servers
                                             snackbarHostState.showSnackbar(
-                                                "Found ${it.size} server(s)"
+                                                "Found ${scan.devices.size} device(s), ${scan.servers.size} RxSci host(s)"
                                             )
                                         }
                                         .onFailure {
@@ -904,13 +948,35 @@ private fun SettingsRoute(
                             }
                         }
                     }
+                    Text(
+                        "Live devices: ${lanDevices.size}   RxSci CLI hosts: ${discoveredServers.size}",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                     if (discoveredServers.isNotEmpty()) {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                "RxSci CLI hosts",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                            )
                             discoveredServers.forEach { server ->
                                 DiscoveredServerCard(
                                     server = server,
                                     onUse = { baseUrl = server.baseUrl },
                                 )
+                            }
+                        }
+                    }
+                    if (lanDevices.isNotEmpty()) {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                "Live LAN devices",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            lanDevices.forEach { device ->
+                                LanDeviceCard(device = device)
                             }
                         }
                     }

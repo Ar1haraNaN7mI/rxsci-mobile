@@ -18,18 +18,23 @@ import com.x.rxsciapp.model.ConnectionSettings
 import com.x.rxsciapp.model.ConnectionState
 import com.x.rxsciapp.model.DiscoveredServer
 import com.x.rxsciapp.model.DraftAttachment
+import com.x.rxsciapp.model.LanDevice
+import com.x.rxsciapp.model.LanScanResult
 import com.x.rxsciapp.model.MessageItem
 import com.x.rxsciapp.model.SessionItem
 import java.io.File
 import java.io.IOException
 import java.net.Inet4Address
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.util.concurrent.TimeUnit
 import java.util.UUID
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -39,7 +44,10 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
@@ -56,12 +64,20 @@ class MobileRepository(
     private val settingsStore: ConnectionSettingsStore,
     private val realtimeClient: MobileRealtimeClient,
 ) {
+    private companion object {
+        const val LAN_SCAN_TIMEOUT_MS = 3_000L
+        const val LAN_SCAN_CONCURRENCY = 96
+        const val HOST_REACHABLE_TIMEOUT_MS = 350
+        const val TCP_CONNECT_TIMEOUT_MS = 180
+        val ALIVE_PROBE_PORTS = listOf(8765, 80, 443, 22, 445, 3389, 8080)
+    }
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val httpClient = OkHttpClient()
     private val discoveryClient = OkHttpClient.Builder()
-        .connectTimeout(450, TimeUnit.MILLISECONDS)
-        .readTimeout(450, TimeUnit.MILLISECONDS)
-        .callTimeout(800, TimeUnit.MILLISECONDS)
+        .connectTimeout(700, TimeUnit.MILLISECONDS)
+        .readTimeout(700, TimeUnit.MILLISECONDS)
+        .callTimeout(1_200, TimeUnit.MILLISECONDS)
         .build()
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Offline)
     private val _settings = settingsStore.settings.stateIn(
@@ -191,18 +207,35 @@ class MobileRepository(
         )
     }
 
-    suspend fun discoverLanServers(port: Int = 8765): Result<List<DiscoveredServer>> {
+    suspend fun scanLan(port: Int = 8765): Result<LanScanResult> {
         return withContext(Dispatchers.IO) {
             runCatching {
                 val hosts = localSubnetHosts()
-                hosts.map { host ->
-                    async { probeMobileServer(host, port) }
-                }.awaitAll()
+                val semaphore = Semaphore(LAN_SCAN_CONCURRENCY)
+                val devices = withTimeoutOrNull(LAN_SCAN_TIMEOUT_MS) {
+                    hosts.map { host ->
+                        async {
+                            semaphore.withPermit {
+                                probeLanDevice(host, port)
+                            }
+                        }
+                    }.awaitAll()
+                }.orEmpty()
                     .filterNotNull()
-                    .distinctBy { it.baseUrl }
+                    .distinctBy { it.host }
                     .sortedBy { it.host }
+                LanScanResult(
+                    devices = devices,
+                    servers = devices.mapNotNull { it.rxsciServer }
+                        .distinctBy { it.baseUrl }
+                        .sortedBy { it.host },
+                )
             }
         }
+    }
+
+    suspend fun discoverLanServers(port: Int = 8765): Result<List<DiscoveredServer>> {
+        return scanLan(port).map { it.servers }
     }
 
     suspend fun createSession(): String {
@@ -389,6 +422,44 @@ class MobileRepository(
         val inetAddress = address as? Inet4Address ?: return null
         if (inetAddress.isLoopbackAddress || inetAddress.isLinkLocalAddress) return null
         return inetAddress.hostAddress
+    }
+
+    private fun probeLanDevice(host: String, rxsciPort: Int): LanDevice? {
+        val rxsciServer = probeMobileServer(host, rxsciPort)
+        val openPorts = ALIVE_PROBE_PORTS
+            .distinct()
+            .filter { port -> rxsciServer?.port == port || canConnect(host, port) }
+        val reachable = rxsciServer != null ||
+            openPorts.isNotEmpty() ||
+            canReachHost(host)
+        if (!reachable) return null
+
+        val aliveBy = when {
+            rxsciServer != null -> "rxsci"
+            openPorts.isNotEmpty() -> "tcp"
+            else -> "reachable"
+        }
+        return LanDevice(
+            host = host,
+            aliveBy = aliveBy,
+            openPorts = openPorts,
+            rxsciServer = rxsciServer,
+        )
+    }
+
+    private fun canReachHost(host: String): Boolean {
+        return runCatching {
+            InetAddress.getByName(host).isReachable(HOST_REACHABLE_TIMEOUT_MS)
+        }.getOrDefault(false)
+    }
+
+    private fun canConnect(host: String, port: Int): Boolean {
+        return runCatching {
+            Socket().use { socket ->
+                socket.connect(InetSocketAddress(host, port), TCP_CONNECT_TIMEOUT_MS)
+                true
+            }
+        }.getOrDefault(false)
     }
 
     private fun probeMobileServer(host: String, port: Int): DiscoveredServer? {

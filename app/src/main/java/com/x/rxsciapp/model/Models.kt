@@ -15,6 +15,18 @@ data class DiscoveredServer(
     val version: String,
 )
 
+data class LanDevice(
+    val host: String,
+    val aliveBy: String,
+    val openPorts: List<Int>,
+    val rxsciServer: DiscoveredServer?,
+)
+
+data class LanScanResult(
+    val devices: List<LanDevice>,
+    val servers: List<DiscoveredServer>,
+)
+
 data class SessionItem(
     val sessionId: String,
     val title: String,
