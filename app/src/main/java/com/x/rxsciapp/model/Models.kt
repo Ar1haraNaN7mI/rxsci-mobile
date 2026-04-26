@@ -7,6 +7,14 @@ data class ConnectionSettings(
     val deviceName: String = "",
 )
 
+data class DiscoveredServer(
+    val baseUrl: String,
+    val host: String,
+    val port: Int,
+    val name: String,
+    val version: String,
+)
+
 data class SessionItem(
     val sessionId: String,
     val title: String,

@@ -1,6 +1,8 @@
 package com.x.rxsciapp.data.repository
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.LinkAddress
 import android.net.Uri
 import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
@@ -14,12 +16,17 @@ import com.x.rxsciapp.data.remote.MobileRealtimeClient
 import com.x.rxsciapp.model.AttachmentItem
 import com.x.rxsciapp.model.ConnectionSettings
 import com.x.rxsciapp.model.ConnectionState
+import com.x.rxsciapp.model.DiscoveredServer
 import com.x.rxsciapp.model.DraftAttachment
 import com.x.rxsciapp.model.MessageItem
 import com.x.rxsciapp.model.SessionItem
-import java.io.IOException
 import java.io.File
+import java.io.IOException
+import java.net.Inet4Address
+import java.util.concurrent.TimeUnit
 import java.util.UUID
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -32,6 +39,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
@@ -50,6 +58,11 @@ class MobileRepository(
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val httpClient = OkHttpClient()
+    private val discoveryClient = OkHttpClient.Builder()
+        .connectTimeout(450, TimeUnit.MILLISECONDS)
+        .readTimeout(450, TimeUnit.MILLISECONDS)
+        .callTimeout(800, TimeUnit.MILLISECONDS)
+        .build()
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Offline)
     private val _settings = settingsStore.settings.stateIn(
         scope = scope,
@@ -176,6 +189,20 @@ class MobileRepository(
                 clientId = current.clientId.ifBlank { UUID.randomUUID().toString() },
             )
         )
+    }
+
+    suspend fun discoverLanServers(port: Int = 8765): Result<List<DiscoveredServer>> {
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                val hosts = localSubnetHosts()
+                hosts.map { host ->
+                    async { probeMobileServer(host, port) }
+                }.awaitAll()
+                    .filterNotNull()
+                    .distinctBy { it.baseUrl }
+                    .sortedBy { it.host }
+            }
+        }
     }
 
     suspend fun createSession(): String {
@@ -340,6 +367,51 @@ class MobileRepository(
             val json = JSONObject(body)
             return json.getString("upload_id")
         }
+    }
+
+    private fun localSubnetHosts(): List<String> {
+        val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE)
+            as? ConnectivityManager ?: return emptyList()
+        val activeNetwork = connectivityManager.activeNetwork ?: return emptyList()
+        val linkProperties = connectivityManager.getLinkProperties(activeNetwork) ?: return emptyList()
+        return linkProperties.linkAddresses
+            .mapNotNull { it.toIpv4Host() }
+            .flatMap { host ->
+                val parts = host.split(".")
+                if (parts.size != 4) return@flatMap emptyList()
+                val prefix = parts.take(3).joinToString(".")
+                (1..254).map { "$prefix.$it" }.filterNot { it == host }
+            }
+            .distinct()
+    }
+
+    private fun LinkAddress.toIpv4Host(): String? {
+        val inetAddress = address as? Inet4Address ?: return null
+        if (inetAddress.isLoopbackAddress || inetAddress.isLinkLocalAddress) return null
+        return inetAddress.hostAddress
+    }
+
+    private fun probeMobileServer(host: String, port: Int): DiscoveredServer? {
+        val baseUrl = "http://$host:$port"
+        val request = Request.Builder()
+            .url("$baseUrl/mobile/discover")
+            .addHeader("Accept", "application/json")
+            .build()
+        return runCatching {
+            discoveryClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return@runCatching null
+                val body = response.body?.string().orEmpty()
+                val json = JSONObject(body)
+                if (json.optString("service") != "rxsci-mobile") return@runCatching null
+                DiscoveredServer(
+                    baseUrl = json.optString("base_url").ifBlank { baseUrl },
+                    host = host,
+                    port = port,
+                    name = json.optString("name").ifBlank { "RxSci Mobile" },
+                    version = json.optString("version").ifBlank { "unknown" },
+                )
+            }
+        }.getOrNull()
     }
 
     private val socketListener = object : MobileRealtimeClient.Listener {

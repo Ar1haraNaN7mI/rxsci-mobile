@@ -41,6 +41,7 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilledIconButton
@@ -82,6 +83,7 @@ import androidx.navigation.navArgument
 import com.x.rxsciapp.data.repository.MobileRepository
 import com.x.rxsciapp.model.AttachmentItem
 import com.x.rxsciapp.model.ConnectionState
+import com.x.rxsciapp.model.DiscoveredServer
 import com.x.rxsciapp.model.MessageItem
 import com.x.rxsciapp.model.SessionItem
 import com.x.rxsciapp.ui.ChatViewModel
@@ -763,6 +765,45 @@ private fun openAttachmentUri(
     context.startActivity(Intent.createChooser(intent, "Open attachment"))
 }
 
+@Composable
+private fun DiscoveredServerCard(
+    server: DiscoveredServer,
+    onUse: () -> Unit,
+) {
+    Card(
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+        ),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    server.name,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    "${server.baseUrl} - ${server.version}",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Button(onClick = onUse) {
+                Text("Use")
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsRoute(
@@ -774,6 +815,8 @@ private fun SettingsRoute(
     var baseUrl by rememberSaveable(settings.baseUrl) { mutableStateOf(settings.baseUrl) }
     var token by rememberSaveable(settings.token) { mutableStateOf(settings.token) }
     var deviceName by rememberSaveable(settings.deviceName) { mutableStateOf(settings.deviceName) }
+    var scanning by rememberSaveable { mutableStateOf(false) }
+    var discoveredServers by remember { mutableStateOf<List<DiscoveredServer>>(emptyList()) }
     val scope = rememberCoroutineScope()
 
     Scaffold(
@@ -802,6 +845,77 @@ private fun SettingsRoute(
                 label = { Text("Server base URL") },
                 supportingText = { Text("Example: http://192.168.1.10:8765") },
             )
+            Surface(
+                shape = RoundedCornerShape(24.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                "LAN discovery",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                "Scan the current subnet for running RxSci mobile servers.",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        Button(
+                            enabled = !scanning,
+                            onClick = {
+                                scope.launch {
+                                    scanning = true
+                                    val result = repository.discoverLanServers()
+                                    scanning = false
+                                    result
+                                        .onSuccess {
+                                            discoveredServers = it
+                                            snackbarHostState.showSnackbar(
+                                                "Found ${it.size} server(s)"
+                                            )
+                                        }
+                                        .onFailure {
+                                            snackbarHostState.showSnackbar(
+                                                it.message ?: "LAN scan failed"
+                                            )
+                                        }
+                                }
+                            },
+                        ) {
+                            if (scanning) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp,
+                                )
+                            } else {
+                                Text("Scan")
+                            }
+                        }
+                    }
+                    if (discoveredServers.isNotEmpty()) {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            discoveredServers.forEach { server ->
+                                DiscoveredServerCard(
+                                    server = server,
+                                    onUse = { baseUrl = server.baseUrl },
+                                )
+                            }
+                        }
+                    }
+                }
+            }
             OutlinedTextField(
                 value = token,
                 onValueChange = { token = it },
